@@ -2,7 +2,7 @@ import streamlit as st
 import requests
 import re
 import random
-from datetime import datetime
+import time
 
 # Page config
 st.set_page_config(page_title="StudyBuzz", page_icon="📚", layout="wide")
@@ -20,8 +20,6 @@ if 'quiz_submitted' not in st.session_state:
     st.session_state.quiz_submitted = False
 if 'flipped_cards' not in st.session_state:
     st.session_state.flipped_cards = set()
-if 'debug_log' not in st.session_state:
-    st.session_state.debug_log = []
 
 # CSS
 st.markdown("""
@@ -45,33 +43,16 @@ p, span, div, label, h1, h2, h3, h4 { color: #ffffff !important; }
     border-radius: 12px; padding: 20px; margin: 15px 0;
     border-left: 4px solid #6366f1;
 }
-.debug-box {
-    background: #1a1a1a; border: 1px solid #333; padding: 10px;
-    border-radius: 5px; font-family: monospace; font-size: 12px;
-    max-height: 200px; overflow-y: auto; color: #00ff00 !important;
-}
 </style>
 """, unsafe_allow_html=True)
 
-def log_debug(msg):
-    st.session_state.debug_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
-    if len(st.session_state.debug_log) > 20:
-        st.session_state.debug_log = st.session_state.debug_log[-20:]
-
 def call_ai(prompt):
     """Call Pollinations AI API with fast models and fallbacks"""
-    import time
     
-    # Use text.pollinations.ai - no auth required
     url = "https://text.pollinations.ai/"
-    
-    # Priority: openai-fast -> mistral -> openai
     models = ["openai-fast", "mistral", "openai"]
     
     for i, model in enumerate(models):
-        log_debug(f"Trying model: {model}")
-        
-        # Add delay between retries to avoid rate limits
         if i > 0:
             time.sleep(3)
         
@@ -87,33 +68,19 @@ def call_ai(prompt):
             
             response = requests.post(url, json=payload, timeout=90)
             
-            log_debug(f"Status: {response.status_code}")
-            
             if response.status_code == 200:
                 text = response.text.strip()
-                
                 if text and len(text) > 50:
-                    log_debug(f"Success with {model}! {len(text)} chars")
                     return text
-                else:
-                    log_debug(f"Empty response from {model}, trying next...")
-                    continue
             elif response.status_code == 429:
-                log_debug(f"Rate limited on {model}, waiting 10s...")
                 time.sleep(10)
-                continue
-            else:
-                log_debug(f"Error {response.status_code}, trying next...")
                 continue
                     
         except requests.exceptions.Timeout:
-            log_debug(f"Timeout with {model}, trying next...")
             continue
-        except Exception as e:
-            log_debug(f"Error with {model}: {str(e)}")
+        except Exception:
             continue
     
-    log_debug("All models failed! Wait a minute and try again.")
     return None
 
 def parse_quiz(text):
@@ -176,10 +143,8 @@ with st.sidebar:
     num_flashcards = st.slider("Flashcards", 3, 15, 8)
     
     st.markdown("---")
-    show_debug = st.checkbox("Show Debug Log")
-    
-    st.markdown("---")
-    st.markdown("⚠️ **Note:** Free API has rate limits. If generation fails, wait 1-2 minutes.")
+    st.markdown("### About")
+    st.markdown("Powered by **Pollinations.AI** 🌸")
     
     if st.button("🗑️ Clear All"):
         st.session_state.quiz_data = None
@@ -188,13 +153,7 @@ with st.sidebar:
         st.session_state.user_answers = {}
         st.session_state.quiz_submitted = False
         st.session_state.flipped_cards = set()
-        st.session_state.debug_log = []
         st.rerun()
-
-# Debug log display
-if show_debug and st.session_state.debug_log:
-    st.markdown("### 🔧 Debug Log")
-    st.markdown(f"<div class='debug-box'>{'<br>'.join(st.session_state.debug_log)}</div>", unsafe_allow_html=True)
 
 # Main input
 topic = st.text_input("📖 Enter a topic to study:", placeholder="e.g., Photosynthesis, World War 2")
@@ -215,8 +174,6 @@ if generate_btn:
         st.session_state.quiz_submitted = False
         st.session_state.flipped_cards = set()
         
-        log_debug(f"Starting generation for: {topic}")
-        
         # Generate Quiz
         if study_mode in ["Quiz", "All Three"]:
             with st.spinner("📝 Generating quiz..."):
@@ -234,17 +191,14 @@ Generate all {num_questions} questions now."""
                 
                 result = call_ai(prompt)
                 if result:
-                    log_debug("Quiz response received, parsing...")
                     parsed = parse_quiz(result)
-                    log_debug(f"Parsed {len(parsed)} questions")
                     if parsed:
                         st.session_state.quiz_data = parsed
                         st.success(f"✅ Generated {len(parsed)} quiz questions!")
                     else:
-                        st.error("Could not parse quiz. Raw response:")
-                        st.code(result[:500])
+                        st.error("Could not parse quiz. Please try again.")
                 else:
-                    st.error("❌ Failed to generate quiz. You may be rate limited. Wait 1-2 minutes and try again.")
+                    st.error("❌ Failed to generate quiz. Please try again.")
         
         # Generate Flashcards
         if study_mode in ["Flashcards", "All Three"]:
@@ -264,17 +218,14 @@ Generate all {num_flashcards} flashcards now."""
                 
                 result = call_ai(prompt)
                 if result:
-                    log_debug("Flashcards response received, parsing...")
                     parsed = parse_flashcards(result)
-                    log_debug(f"Parsed {len(parsed)} flashcards")
                     if parsed:
                         st.session_state.flashcards_data = parsed
                         st.success(f"✅ Generated {len(parsed)} flashcards!")
                     else:
-                        st.error("Could not parse flashcards. Raw response:")
-                        st.code(result[:500])
+                        st.error("Could not parse flashcards. Please try again.")
                 else:
-                    st.error("❌ Failed to generate flashcards. You may be rate limited. Wait 1-2 minutes and try again.")
+                    st.error("❌ Failed to generate flashcards. Please try again.")
         
         # Generate Study Guide
         if study_mode in ["Study Guide", "All Three"]:
@@ -291,11 +242,10 @@ Make it clear and helpful for students."""
                 
                 result = call_ai(prompt)
                 if result:
-                    log_debug("Study guide received")
                     st.session_state.study_guide_data = result
                     st.success("✅ Generated study guide!")
                 else:
-                    st.error("❌ Failed to generate study guide. You may be rate limited. Wait 1-2 minutes and try again.")
+                    st.error("❌ Failed to generate study guide. Please try again.")
 
 # Display Quiz
 if st.session_state.quiz_data:
