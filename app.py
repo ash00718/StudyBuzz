@@ -373,7 +373,45 @@ def get_theme_css():
 st.markdown(get_theme_css(), unsafe_allow_html=True)
 
 # ============== AI API FUNCTIONS ==============
-def call_ai_json(prompt, system_msg, max_retries=2):
+def repair_truncated_json(content, expected_key="flashcards"):
+    """Attempt to repair truncated JSON by closing open structures"""
+    try:
+        # First try parsing as-is
+        return json.loads(content)
+    except json.JSONDecodeError:
+        pass
+    
+    # Try to repair common truncation issues
+    repaired = content.strip()
+    
+    # Remove trailing incomplete strings (ending mid-quote)
+    if repaired.count('"') % 2 == 1:
+        # Odd number of quotes - find last complete entry
+        last_complete = repaired.rfind('"},')
+        if last_complete > 0:
+            repaired = repaired[:last_complete + 2]
+        else:
+            last_complete = repaired.rfind('"}')
+            if last_complete > 0:
+                repaired = repaired[:last_complete + 2]
+    
+    # Close open structures
+    open_braces = repaired.count('{') - repaired.count('}')
+    open_brackets = repaired.count('[') - repaired.count(']')
+    
+    # Remove any trailing comma
+    repaired = repaired.rstrip().rstrip(',')
+    
+    # Add closing brackets and braces
+    repaired += ']' * open_brackets
+    repaired += '}' * open_braces
+    
+    try:
+        return json.loads(repaired)
+    except json.JSONDecodeError:
+        return None
+
+def call_ai_json(prompt, system_msg, max_retries=3, max_tokens=2000):
     """Call AI API and expect JSON response"""
     client = get_openai_client()
     
@@ -386,6 +424,7 @@ def call_ai_json(prompt, system_msg, max_retries=2):
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.7,
+                max_tokens=max_tokens,
             )
             
             content = response.choices[0].message.content.strip()
@@ -402,9 +441,20 @@ def call_ai_json(prompt, system_msg, max_retries=2):
                 content = content[:-3]
             content = content.strip()
             
-            # Parse JSON
-            data = json.loads(content)
-            return data
+            # Try to parse JSON
+            try:
+                data = json.loads(content)
+                return data
+            except json.JSONDecodeError:
+                # Try to repair truncated JSON
+                if st.session_state.debug_mode:
+                    st.warning("Attempting to repair truncated JSON...")
+                data = repair_truncated_json(content)
+                if data:
+                    if st.session_state.debug_mode:
+                        st.success("JSON repair successful!")
+                    return data
+                raise json.JSONDecodeError("Could not repair JSON", content, 0)
             
         except json.JSONDecodeError as e:
             st.session_state.last_api_error = f"JSON Parse Error: {str(e)}"
@@ -530,24 +580,22 @@ Keep answers concise (1-3 words)."""
 
 def generate_flashcards(topic, num_cards, subject_context):
     """Generate flashcards with structured JSON"""
-    system_msg = """You are a flashcard generator. Output ONLY a valid JSON object with no additional text.
-Format:
-{
-    "flashcards": [
-        {
-            "front": "Term or question",
-            "back": "Definition or answer"
-        }
-    ]
-}
-Make flashcards educational and concise."""
+    # Limit to 8 cards max to prevent truncation
+    actual_num = min(num_cards, 8)
+    
+    system_msg = """You are a flashcard generator. Output ONLY valid JSON, no other text.
+CRITICAL: Keep responses SHORT to avoid truncation.
+- Front: Maximum 8 words
+- Back: Maximum 15 words
 
-    prompt = f"""Create {num_cards} educational flashcards about "{topic}" {subject_context}.
-Include a mix of:
-- Key terms and definitions
-- Important concepts
-- Facts to remember
-Keep the back side concise but informative."""
+Format:
+{"flashcards":[{"front":"Term","back":"Short definition"}]}"""
+
+    prompt = f"""Create exactly {actual_num} flashcards about "{topic}" {subject_context}.
+IMPORTANT: Keep each card very brief!
+- Front: 1-8 words only
+- Back: 1-15 words only
+Output valid JSON only."""
 
     data = call_ai_json(prompt, system_msg)
     
@@ -841,7 +889,8 @@ elif st.session_state.page == "study":
             num_questions = 5
         
         if study_mode in ["Flashcards", "All Three"]:
-            num_flashcards = st.slider("Flashcards", 5, 20, 10)
+            num_flashcards = st.slider("Flashcards", 4, 8, 6)
+            st.caption("💡 Limited to 8 cards for reliable generation")
             flashcard_mode = st.selectbox("Flashcard Mode", ["Flip Cards", "Matching Game"])
         else:
             num_flashcards = 10
