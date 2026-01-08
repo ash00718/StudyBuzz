@@ -60,23 +60,31 @@ def log_debug(msg):
 
 def call_ai(prompt):
     """Call Pollinations AI API with fast models and fallbacks"""
+    import time
     
-    # Priority: openai-fast (fastest) -> mistral (reliable) -> openai (slow but smart)
-    models = ["openai-fast", "mistral", "openai"]
+    # Priority: openai-fast -> gemini-fast -> mistral -> openai
+    models = ["openai-fast", "gemini-fast", "mistral", "openai"]
     
-    for model in models:
+    for i, model in enumerate(models):
         log_debug(f"Trying model: {model}")
         
+        # Add delay between retries to avoid rate limits
+        if i > 0:
+            time.sleep(2)
+        
         try:
+            # Using the newer gen.pollinations.ai endpoint
             response = requests.post(
-                "https://text.pollinations.ai/",
+                "https://gen.pollinations.ai/openai/chat/completions",
                 json={
                     "messages": [
                         {"role": "system", "content": "You are a helpful study assistant. Follow the exact format requested. Be concise but thorough."},
                         {"role": "user", "content": prompt}
                     ],
-                    "model": model,
-                    "seed": random.randint(1, 10000)
+                    "model": model
+                },
+                headers={
+                    "Content-Type": "application/json"
                 },
                 timeout=60
             )
@@ -84,13 +92,24 @@ def call_ai(prompt):
             log_debug(f"Status: {response.status_code}")
             
             if response.status_code == 200:
-                text = response.text.strip()
+                try:
+                    # New endpoint returns JSON in OpenAI format
+                    data = response.json()
+                    text = data["choices"][0]["message"]["content"].strip()
+                except:
+                    # Fallback to raw text
+                    text = response.text.strip()
+                
                 if text and len(text) > 50:
                     log_debug(f"Success with {model}! {len(text)} chars")
                     return text
                 else:
                     log_debug(f"Empty response from {model}, trying next...")
                     continue
+            elif response.status_code == 429:
+                log_debug(f"Rate limited on {model}, waiting 5s...")
+                time.sleep(5)
+                continue
             else:
                 log_debug(f"Error {response.status_code} from {model}, trying next...")
                 continue
@@ -102,7 +121,7 @@ def call_ai(prompt):
             log_debug(f"Error with {model}: {str(e)}")
             continue
     
-    log_debug("All models failed!")
+    log_debug("All models failed! You may be rate limited. Wait a minute and try again.")
     return None
 
 def parse_quiz(text):
@@ -167,6 +186,9 @@ with st.sidebar:
     st.markdown("---")
     show_debug = st.checkbox("Show Debug Log")
     
+    st.markdown("---")
+    st.markdown("⚠️ **Note:** Free API has rate limits. If generation fails, wait 1-2 minutes.")
+    
     if st.button("🗑️ Clear All"):
         st.session_state.quiz_data = None
         st.session_state.flashcards_data = None
@@ -230,7 +252,7 @@ Generate all {num_questions} questions now."""
                         st.error("Could not parse quiz. Raw response:")
                         st.code(result[:500])
                 else:
-                    st.error("❌ Failed to generate quiz. Please try again.")
+                    st.error("❌ Failed to generate quiz. You may be rate limited. Wait 1-2 minutes and try again.")
         
         # Generate Flashcards
         if study_mode in ["Flashcards", "All Three"]:
@@ -260,7 +282,7 @@ Generate all {num_flashcards} flashcards now."""
                         st.error("Could not parse flashcards. Raw response:")
                         st.code(result[:500])
                 else:
-                    st.error("❌ Failed to generate flashcards. Please try again.")
+                    st.error("❌ Failed to generate flashcards. You may be rate limited. Wait 1-2 minutes and try again.")
         
         # Generate Study Guide
         if study_mode in ["Study Guide", "All Three"]:
@@ -281,7 +303,7 @@ Make it clear and helpful for students."""
                     st.session_state.study_guide_data = result
                     st.success("✅ Generated study guide!")
                 else:
-                    st.error("❌ Failed to generate study guide. Please try again.")
+                    st.error("❌ Failed to generate study guide. You may be rate limited. Wait 1-2 minutes and try again.")
 
 # Display Quiz
 if st.session_state.quiz_data:
