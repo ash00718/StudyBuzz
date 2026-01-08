@@ -1,11 +1,19 @@
 import streamlit as st
-import requests
 import json
 import re
 import time
 import random
 from datetime import datetime, timedelta
-from io import BytesIO
+from openai import OpenAI
+
+# ============== API CLIENT SETUP ==============
+@st.cache_resource
+def get_openai_client():
+    """Initialize OpenAI client for Pollinations API"""
+    return OpenAI(
+        api_key="pollinations",
+        base_url="https://text.pollinations.ai/openai",
+    )
 
 # ============== SESSION STATE INITIALIZATION ==============
 def init_session_state():
@@ -16,7 +24,6 @@ def init_session_state():
         'current_topic': None,
         # Quiz states
         'quiz_data': None,
-        'quiz_raw': None,
         'user_answers': {},
         'quiz_submitted': False,
         'tf_data': None,
@@ -52,6 +59,9 @@ def init_session_state():
         'chat_messages': [],
         'show_hints': {},
         'explanations': {},
+        # Debug
+        'debug_mode': False,
+        'last_api_error': None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -71,98 +81,499 @@ def get_theme_css():
     if st.session_state.theme == 'dark':
         return """
         <style>
-        .stApp { background-color: #0e1117; }
-        .main-header { text-align: center; color: #ffffff !important; padding: 20px; }
-        .subtitle { text-align: center; color: #b0b0b0 !important; font-size: 18px; margin-bottom: 30px; }
+        @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+        
+        .stApp { 
+            background: linear-gradient(135deg, #0a0a0f 0%, #1a1a2e 50%, #0f0f1a 100%);
+            font-family: 'Space Grotesk', sans-serif;
+        }
+        .main-header { 
+            text-align: center; 
+            color: #ffffff !important; 
+            padding: 20px;
+            font-size: 3rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, #6366f1, #a855f7, #ec4899);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        .subtitle { 
+            text-align: center; 
+            color: #94a3b8 !important; 
+            font-size: 1.1rem; 
+            margin-bottom: 2rem;
+            letter-spacing: 0.5px;
+        }
         .stMarkdown, .stMarkdown p, .stMarkdown div, .stMarkdown span,
         .stMarkdown h1, .stMarkdown h2, .stMarkdown h3, .stMarkdown h4, .stMarkdown h5, .stMarkdown h6,
-        p, span, div, label { color: #ffffff !important; }
-        [data-testid="stSidebar"] { background-color: #1a1a2e; }
-        [data-testid="stSidebar"] * { color: #ffffff !important; }
-        .mode-card {
-            background: linear-gradient(135deg, #1e1e2e 0%, #2d2d44 100%);
-            border-radius: 20px; padding: 30px; text-align: center;
-            border: 2px solid #3d3d5c; min-height: 180px;
-            display: flex; flex-direction: column; justify-content: center; align-items: center;
-            margin-bottom: 10px; transition: all 0.3s ease;
+        p, span, div, label { color: #e2e8f0 !important; }
+        
+        [data-testid="stSidebar"] { 
+            background: linear-gradient(180deg, #1e1e2e 0%, #2d2d44 100%);
+            border-right: 1px solid rgba(99, 102, 241, 0.2);
         }
-        .mode-card:hover { border-color: #6366f1; box-shadow: 0 10px 30px rgba(99, 102, 241, 0.3); }
-        .mode-icon { font-size: 42px; margin-bottom: 15px; }
-        .mode-title { font-size: 20px; font-weight: bold; color: #ffffff !important; margin-bottom: 8px; }
-        .mode-description { font-size: 13px; color: #a0a0a0 !important; line-height: 1.4; }
+        [data-testid="stSidebar"] * { color: #e2e8f0 !important; }
+        
+        .mode-card {
+            background: linear-gradient(135deg, rgba(30, 30, 46, 0.8) 0%, rgba(45, 45, 68, 0.8) 100%);
+            backdrop-filter: blur(10px);
+            border-radius: 20px; 
+            padding: 30px; 
+            text-align: center;
+            border: 1px solid rgba(99, 102, 241, 0.3);
+            min-height: 200px;
+            display: flex; 
+            flex-direction: column; 
+            justify-content: center; 
+            align-items: center;
+            margin-bottom: 10px; 
+            transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+            position: relative;
+            overflow: hidden;
+        }
+        .mode-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: linear-gradient(135deg, rgba(99, 102, 241, 0.1) 0%, rgba(168, 85, 247, 0.1) 100%);
+            opacity: 0;
+            transition: opacity 0.4s ease;
+        }
+        .mode-card:hover {
+            border-color: #6366f1;
+            transform: translateY(-5px);
+            box-shadow: 0 20px 40px rgba(99, 102, 241, 0.3);
+        }
+        .mode-card:hover::before { opacity: 1; }
+        .mode-icon { font-size: 48px; margin-bottom: 15px; filter: drop-shadow(0 4px 8px rgba(0,0,0,0.3)); }
+        .mode-title { font-size: 1.3rem; font-weight: 600; color: #ffffff !important; margin-bottom: 10px; }
+        .mode-description { font-size: 0.9rem; color: #94a3b8 !important; line-height: 1.5; }
+        
         .flashcard {
             background: linear-gradient(135deg, #1e3a5f 0%, #2d5a87 100%);
-            border-radius: 15px; padding: 25px; min-height: 150px;
-            display: flex; flex-direction: column; justify-content: center; align-items: center;
-            text-align: center; box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
-            border: 1px solid #3d7ab5; margin-bottom: 10px;
+            border-radius: 16px; 
+            padding: 30px; 
+            min-height: 180px;
+            display: flex; 
+            flex-direction: column; 
+            justify-content: center; 
+            align-items: center;
+            text-align: center; 
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+            border: 1px solid rgba(61, 122, 181, 0.5);
+            margin-bottom: 15px;
+            transition: all 0.3s ease;
         }
+        .flashcard:hover { transform: scale(1.02); }
         .flashcard-back {
             background: linear-gradient(135deg, #1a4731 0%, #2d7a4f 100%);
-            border-color: #3db56a;
+            border-color: rgba(61, 181, 106, 0.5);
         }
-        .flashcard-label { font-size: 12px; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 10px; opacity: 0.8; color: #a0c4e8 !important; }
-        .flashcard-content { font-size: 18px; font-weight: 500; color: #ffffff !important; line-height: 1.5; }
+        .flashcard-label { 
+            font-size: 0.7rem; 
+            text-transform: uppercase; 
+            letter-spacing: 3px; 
+            margin-bottom: 15px; 
+            opacity: 0.7;
+            color: #a0c4e8 !important;
+            font-weight: 500;
+        }
+        .flashcard-content { 
+            font-size: 1.2rem; 
+            font-weight: 500; 
+            color: #ffffff !important; 
+            line-height: 1.6;
+        }
+        
         .quiz-question {
-            background: linear-gradient(135deg, #2d2d44 0%, #3d3d5c 100%);
-            border-radius: 12px; padding: 20px; margin: 15px 0; border-left: 4px solid #6366f1;
+            background: linear-gradient(135deg, rgba(45, 45, 68, 0.9) 0%, rgba(61, 61, 92, 0.9) 100%);
+            border-radius: 16px; 
+            padding: 25px; 
+            margin: 20px 0;
+            border-left: 4px solid #6366f1;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
         }
-        .quiz-question h4 { color: #ffffff !important; margin-bottom: 15px; }
-        .correct-answer { background: linear-gradient(135deg, #1a4731 0%, #2d7a4f 100%) !important; border-left-color: #22c55e !important; }
-        .incorrect-answer { background: linear-gradient(135deg, #4a1a1a 0%, #7a2d2d 100%) !important; border-left-color: #ef4444 !important; }
+        .quiz-question h4 { color: #ffffff !important; margin-bottom: 15px; font-weight: 600; }
+        .correct-answer { 
+            background: linear-gradient(135deg, rgba(26, 71, 49, 0.9) 0%, rgba(45, 122, 79, 0.9) 100%) !important;
+            border-left-color: #22c55e !important;
+        }
+        .incorrect-answer { 
+            background: linear-gradient(135deg, rgba(74, 26, 26, 0.9) 0%, rgba(122, 45, 45, 0.9) 100%) !important;
+            border-left-color: #ef4444 !important;
+        }
+        
         .results-box {
-            background: linear-gradient(135deg, #1e1e2e 0%, #2d2d44 100%);
-            border-radius: 15px; padding: 30px; text-align: center; margin: 20px 0; border: 2px solid #6366f1;
+            background: linear-gradient(135deg, rgba(30, 30, 46, 0.95) 0%, rgba(45, 45, 68, 0.95) 100%);
+            border-radius: 20px; 
+            padding: 40px; 
+            text-align: center; 
+            margin: 30px 0;
+            border: 2px solid #6366f1;
+            box-shadow: 0 10px 40px rgba(99, 102, 241, 0.3);
         }
-        .score-display { font-size: 48px; font-weight: bold; color: #6366f1 !important; margin: 10px 0; }
-        .xp-bar { background: #2d2d44; border-radius: 10px; height: 24px; overflow: hidden; margin: 10px 0; }
-        .xp-fill { background: linear-gradient(90deg, #6366f1, #8b5cf6); height: 100%; transition: width 0.5s ease; }
-        .achievement { background: linear-gradient(135deg, #4a3f00 0%, #6b5a00 100%); border-radius: 10px; padding: 10px 15px; margin: 5px; display: inline-block; border: 1px solid #fbbf24; }
-        .stat-card { background: linear-gradient(135deg, #1e1e2e 0%, #2d2d44 100%); border-radius: 12px; padding: 20px; text-align: center; border: 1px solid #3d3d5c; }
-        .timer-display { font-size: 36px; font-weight: bold; color: #ef4444 !important; text-align: center; padding: 10px; background: rgba(239, 68, 68, 0.1); border-radius: 10px; margin: 10px 0; }
-        .hint-box { background: linear-gradient(135deg, #3d3d00 0%, #5a5a00 100%); border-radius: 10px; padding: 15px; margin: 10px 0; border-left: 4px solid #fbbf24; }
-        .explanation-box { background: linear-gradient(135deg, #1a3a4a 0%, #2d5a6a 100%); border-radius: 10px; padding: 15px; margin: 10px 0; border-left: 4px solid #38bdf8; }
-        .matching-card { background: linear-gradient(135deg, #2d2d44 0%, #3d3d5c 100%); border-radius: 10px; padding: 15px; margin: 5px; text-align: center; cursor: pointer; border: 2px solid #3d3d5c; transition: all 0.2s; }
-        .matching-card:hover { border-color: #6366f1; }
-        .matching-card.selected { border-color: #fbbf24; background: linear-gradient(135deg, #4a3f00 0%, #5a4f00 100%); }
-        .matching-card.matched { border-color: #22c55e; background: linear-gradient(135deg, #1a4731 0%, #2d5a4f 100%); opacity: 0.7; }
-        .footer { text-align: center; color: #888888 !important; padding: 20px; }
-        .footer p { color: #888888 !important; }
-        .stButton > button { background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%); color: white; border: none; border-radius: 8px; padding: 10px 20px; font-weight: 500; }
-        .stButton > button:hover { transform: translateY(-2px); box-shadow: 0 4px 15px rgba(99, 102, 241, 0.4); }
-        .stRadio label { color: #ffffff !important; }
-        .chat-message { padding: 15px; border-radius: 10px; margin: 10px 0; }
-        .chat-user { background: linear-gradient(135deg, #1e3a5f 0%, #2d5a87 100%); margin-left: 20%; }
-        .chat-ai { background: linear-gradient(135deg, #2d2d44 0%, #3d3d5c 100%); margin-right: 20%; }
+        .score-display { 
+            font-size: 4rem; 
+            font-weight: 700;
+            background: linear-gradient(135deg, #6366f1, #a855f7);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin: 15px 0;
+        }
+        
+        .stat-card { 
+            background: linear-gradient(135deg, rgba(30, 30, 46, 0.8) 0%, rgba(45, 45, 68, 0.8) 100%);
+            border-radius: 16px; 
+            padding: 25px; 
+            text-align: center;
+            border: 1px solid rgba(99, 102, 241, 0.2);
+            transition: all 0.3s ease;
+        }
+        .stat-card:hover { border-color: rgba(99, 102, 241, 0.5); }
+        .stat-card h3 { color: #ffffff !important; font-size: 1.1rem; margin-bottom: 5px; }
+        .stat-card p { color: #94a3b8 !important; font-size: 0.9rem; }
+        
+        .timer-display { 
+            font-size: 2.5rem; 
+            font-weight: 700;
+            font-family: 'JetBrains Mono', monospace;
+            color: #ef4444 !important; 
+            text-align: center; 
+            padding: 15px;
+            background: rgba(239, 68, 68, 0.1);
+            border-radius: 12px;
+            margin: 15px 0;
+            border: 1px solid rgba(239, 68, 68, 0.3);
+        }
+        
+        .hint-box { 
+            background: linear-gradient(135deg, rgba(61, 61, 0, 0.8) 0%, rgba(90, 90, 0, 0.8) 100%);
+            border-radius: 12px; 
+            padding: 20px; 
+            margin: 15px 0;
+            border-left: 4px solid #fbbf24;
+        }
+        .explanation-box { 
+            background: linear-gradient(135deg, rgba(26, 58, 74, 0.8) 0%, rgba(45, 90, 106, 0.8) 100%);
+            border-radius: 12px; 
+            padding: 20px; 
+            margin: 15px 0;
+            border-left: 4px solid #38bdf8;
+        }
+        
+        .achievement { 
+            background: linear-gradient(135deg, rgba(74, 63, 0, 0.9) 0%, rgba(107, 90, 0, 0.9) 100%);
+            border-radius: 12px; 
+            padding: 15px 20px; 
+            margin: 8px;
+            display: inline-block;
+            border: 1px solid #fbbf24;
+            transition: all 0.3s ease;
+        }
+        .achievement:hover { transform: scale(1.05); }
+        
+        .footer { text-align: center; color: #64748b !important; padding: 30px; }
+        .footer p { color: #64748b !important; }
+        
+        .stButton > button { 
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+            color: white !important;
+            border: none;
+            border-radius: 10px;
+            padding: 12px 24px;
+            font-weight: 600;
+            font-family: 'Space Grotesk', sans-serif;
+            transition: all 0.3s ease;
+        }
+        .stButton > button:hover { 
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(99, 102, 241, 0.4);
+        }
+        
+        .chat-message { 
+            padding: 18px; 
+            border-radius: 12px; 
+            margin: 12px 0;
+            line-height: 1.6;
+        }
+        .chat-user { 
+            background: linear-gradient(135deg, #1e3a5f 0%, #2d5a87 100%);
+            margin-left: 15%;
+        }
+        .chat-ai { 
+            background: linear-gradient(135deg, #2d2d44 0%, #3d3d5c 100%);
+            margin-right: 15%;
+        }
+        
+        .debug-box {
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid #ef4444;
+            border-radius: 8px;
+            padding: 15px;
+            margin: 10px 0;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+        }
         </style>
         """
     else:
         return """
         <style>
-        .stApp { background-color: #ffffff; }
-        .main-header { text-align: center; color: #1e1e2e !important; padding: 20px; }
-        .subtitle { text-align: center; color: #666666 !important; font-size: 18px; margin-bottom: 30px; }
-        .stMarkdown, .stMarkdown p, .stMarkdown div, .stMarkdown span, p, span, div, label { color: #1e1e2e !important; }
-        [data-testid="stSidebar"] { background-color: #f0f2f6; }
-        [data-testid="stSidebar"] * { color: #1e1e2e !important; }
-        .mode-card { background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%); border-radius: 20px; padding: 30px; text-align: center; border: 2px solid #dee2e6; min-height: 180px; margin-bottom: 10px; }
-        .mode-card:hover { border-color: #6366f1; }
-        .mode-title { color: #1e1e2e !important; }
-        .mode-description { color: #666666 !important; }
-        .flashcard { background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%); border-color: #2196f3; }
-        .flashcard-back { background: linear-gradient(135deg, #e8f5e9 0%, #c8e6c9 100%); border-color: #4caf50; }
-        .flashcard-label { color: #1565c0 !important; }
-        .flashcard-content { color: #1e1e2e !important; }
-        .quiz-question { background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%); }
-        .quiz-question h4 { color: #1e1e2e !important; }
-        .results-box { background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%); border-color: #6366f1; }
-        .score-display { color: #6366f1 !important; }
-        .stat-card { background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%); border-color: #dee2e6; }
-        .footer p { color: #666666 !important; }
+        @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+        
+        .stApp { 
+            background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+            font-family: 'Space Grotesk', sans-serif;
+        }
+        .main-header { 
+            text-align: center; 
+            padding: 20px;
+            font-size: 3rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, #4f46e5, #7c3aed, #db2777);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        .subtitle { text-align: center; color: #64748b !important; font-size: 1.1rem; margin-bottom: 2rem; }
+        .stMarkdown, .stMarkdown p, .stMarkdown div, .stMarkdown span, p, span, div, label { color: #1e293b !important; }
+        [data-testid="stSidebar"] { background: linear-gradient(180deg, #f1f5f9 0%, #e2e8f0 100%); }
+        [data-testid="stSidebar"] * { color: #1e293b !important; }
+        .mode-card { 
+            background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
+            border-radius: 20px; 
+            padding: 30px; 
+            text-align: center;
+            border: 1px solid #e2e8f0;
+            min-height: 200px; 
+            margin-bottom: 10px;
+            transition: all 0.3s ease;
+        }
+        .mode-card:hover { border-color: #6366f1; box-shadow: 0 10px 30px rgba(99, 102, 241, 0.15); }
+        .mode-title { color: #1e293b !important; }
+        .mode-description { color: #64748b !important; }
+        .flashcard { background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%); border-color: #3b82f6; }
+        .flashcard-back { background: linear-gradient(135deg, #dcfce7 0%, #bbf7d0 100%); border-color: #22c55e; }
+        .flashcard-label { color: #1d4ed8 !important; }
+        .flashcard-content { color: #1e293b !important; }
+        .quiz-question { background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%); }
+        .quiz-question h4 { color: #1e293b !important; }
+        .results-box { background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%); border-color: #6366f1; }
+        .stat-card { background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%); border-color: #e2e8f0; }
+        .stat-card h3 { color: #1e293b !important; }
+        .footer p { color: #64748b !important; }
         </style>
         """
 
 st.markdown(get_theme_css(), unsafe_allow_html=True)
+
+# ============== AI API FUNCTIONS ==============
+def call_ai_json(prompt, system_msg, max_retries=2):
+    """Call AI API and expect JSON response"""
+    client = get_openai_client()
+    
+    for attempt in range(max_retries):
+        try:
+            response = client.chat.completions.create(
+                model="openai",
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.7,
+            )
+            
+            content = response.choices[0].message.content.strip()
+            
+            if st.session_state.debug_mode:
+                st.markdown(f"<div class='debug-box'><strong>Raw API Response:</strong><br>{content[:500]}...</div>", unsafe_allow_html=True)
+            
+            # Clean up common JSON formatting issues
+            if content.startswith("```json"):
+                content = content[7:]
+            if content.startswith("```"):
+                content = content[3:]
+            if content.endswith("```"):
+                content = content[:-3]
+            content = content.strip()
+            
+            # Parse JSON
+            data = json.loads(content)
+            return data
+            
+        except json.JSONDecodeError as e:
+            st.session_state.last_api_error = f"JSON Parse Error: {str(e)}"
+            if st.session_state.debug_mode:
+                st.error(f"JSON Parse Error (attempt {attempt + 1}): {str(e)}")
+            if attempt < max_retries - 1:
+                time.sleep(1)
+                continue
+            return None
+            
+        except Exception as e:
+            st.session_state.last_api_error = f"API Error: {str(e)}"
+            if st.session_state.debug_mode:
+                st.error(f"API Error (attempt {attempt + 1}): {str(e)}")
+            if attempt < max_retries - 1:
+                time.sleep(1)
+                continue
+            return None
+    
+    return None
+
+def call_ai_text(prompt, system_msg="You are a helpful educational assistant."):
+    """Call AI API and expect text response"""
+    client = get_openai_client()
+    
+    try:
+        response = client.chat.completions.create(
+            model="openai",
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7,
+        )
+        
+        content = response.choices[0].message.content.strip()
+        return content
+        
+    except Exception as e:
+        st.session_state.last_api_error = f"API Error: {str(e)}"
+        if st.session_state.debug_mode:
+            st.error(f"API Error: {str(e)}")
+        return None
+
+# ============== QUIZ GENERATION FUNCTIONS ==============
+def generate_multiple_choice_quiz(topic, num_questions, difficulty, subject_context):
+    """Generate multiple choice quiz with structured JSON"""
+    system_msg = """You are a quiz generator. Output ONLY a valid JSON object with no additional text.
+Format:
+{
+    "questions": [
+        {
+            "question": "Question text here",
+            "options": {
+                "A": "First option",
+                "B": "Second option", 
+                "C": "Third option",
+                "D": "Fourth option"
+            },
+            "correct": "A"
+        }
+    ]
+}
+Ensure all questions are educational and appropriate. The "correct" field must be A, B, C, or D."""
+
+    prompt = f"""Create a {difficulty} difficulty quiz about "{topic}" {subject_context} with exactly {num_questions} multiple choice questions.
+Each question should have 4 options (A, B, C, D) with one correct answer.
+Make questions educational and engaging."""
+
+    data = call_ai_json(prompt, system_msg)
+    
+    if data and "questions" in data:
+        return data["questions"]
+    return None
+
+def generate_true_false_quiz(topic, num_questions, difficulty, subject_context):
+    """Generate true/false quiz with structured JSON"""
+    system_msg = """You are a quiz generator. Output ONLY a valid JSON object with no additional text.
+Format:
+{
+    "questions": [
+        {
+            "statement": "A statement that is either true or false",
+            "answer": true
+        }
+    ]
+}
+The "answer" field must be a boolean (true or false, not strings)."""
+
+    prompt = f"""Create a {difficulty} difficulty true/false quiz about "{topic}" {subject_context} with exactly {num_questions} statements.
+Mix true and false statements roughly equally.
+Make statements clear and educational."""
+
+    data = call_ai_json(prompt, system_msg)
+    
+    if data and "questions" in data:
+        return data["questions"]
+    return None
+
+def generate_fill_blank_quiz(topic, num_questions, difficulty, subject_context):
+    """Generate fill-in-the-blank quiz with structured JSON"""
+    system_msg = """You are a quiz generator. Output ONLY a valid JSON object with no additional text.
+Format:
+{
+    "questions": [
+        {
+            "sentence": "The process of _____ converts sunlight into energy.",
+            "answer": "photosynthesis"
+        }
+    ]
+}
+Use _____ (5 underscores) to mark the blank. Keep answers to 1-3 words."""
+
+    prompt = f"""Create a {difficulty} difficulty fill-in-the-blank quiz about "{topic}" {subject_context} with exactly {num_questions} sentences.
+Each sentence should have exactly one blank marked with _____.
+Keep answers concise (1-3 words)."""
+
+    data = call_ai_json(prompt, system_msg)
+    
+    if data and "questions" in data:
+        return data["questions"]
+    return None
+
+def generate_flashcards(topic, num_cards, subject_context):
+    """Generate flashcards with structured JSON"""
+    system_msg = """You are a flashcard generator. Output ONLY a valid JSON object with no additional text.
+Format:
+{
+    "flashcards": [
+        {
+            "front": "Term or question",
+            "back": "Definition or answer"
+        }
+    ]
+}
+Make flashcards educational and concise."""
+
+    prompt = f"""Create {num_cards} educational flashcards about "{topic}" {subject_context}.
+Include a mix of:
+- Key terms and definitions
+- Important concepts
+- Facts to remember
+Keep the back side concise but informative."""
+
+    data = call_ai_json(prompt, system_msg)
+    
+    if data and "flashcards" in data:
+        return data["flashcards"]
+    return None
+
+def generate_study_guide(topic, subject_context):
+    """Generate comprehensive study guide as text"""
+    system_msg = """You are an educational content creator. Create comprehensive, well-organized study guides.
+Use clear headings, bullet points, and organized sections.
+Make content engaging and easy to understand."""
+
+    prompt = f"""Create a comprehensive study guide about "{topic}" {subject_context}.
+
+Include these sections:
+1. **Overview** - A brief 2-3 sentence introduction
+2. **Key Concepts** - 5 main ideas with clear explanations
+3. **Important Terms** - Definitions of key vocabulary
+4. **Common Misconceptions** - What people often get wrong
+5. **Study Tips** - How to effectively learn this material
+6. **Related Topics** - What to explore next
+
+Make it engaging and suitable for students."""
+
+    return call_ai_text(prompt, system_msg)
 
 # ============== HELPER FUNCTIONS ==============
 ACHIEVEMENTS = {
@@ -232,105 +643,8 @@ def get_level():
         xp_needed = int(xp_needed * 1.5)
     return level, xp, xp_needed
 
-def parse_quiz(quiz_text):
-    questions = []
-    q_pattern = r'Q\d+[:\.]?\s*'
-    parts = re.split(q_pattern, quiz_text)
-    
-    for part in parts[1:]:
-        if not part.strip():
-            continue
-        lines = part.strip().split('\n')
-        question_text = ""
-        options = {}
-        correct_answer = ""
-        
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            if 'correct' in line.lower() and 'answer' in line.lower():
-                answer_match = re.search(r'[:\s]+([A-D])\b', line, re.IGNORECASE)
-                if answer_match:
-                    correct_answer = answer_match.group(1).upper()
-                continue
-            option_match = re.match(r'^\(?([A-D])\)?[\.\):]?\s*(.+)', line, re.IGNORECASE)
-            if option_match:
-                letter = option_match.group(1).upper()
-                text = option_match.group(2).strip()
-                options[letter] = text
-            elif not options:
-                question_text += line + " "
-        
-        if question_text and len(options) >= 2 and correct_answer:
-            questions.append({'question': question_text.strip(), 'options': options, 'correct': correct_answer})
-    return questions
-
-def parse_tf_quiz(text):
-    questions = []
-    lines = text.strip().split('\n')
-    current_q = None
-    
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        
-        q_match = re.match(r'^\d+[\.\)]\s*(.+)', line)
-        if q_match:
-            if current_q:
-                questions.append(current_q)
-            current_q = {'question': q_match.group(1), 'answer': None}
-        elif current_q and ('true' in line.lower() or 'false' in line.lower()):
-            if 'true' in line.lower() and 'false' not in line.lower():
-                current_q['answer'] = True
-            elif 'false' in line.lower():
-                current_q['answer'] = False
-    
-    if current_q and current_q['answer'] is not None:
-        questions.append(current_q)
-    
-    return questions
-
-def parse_fib_quiz(text):
-    questions = []
-    lines = text.strip().split('\n')
-    
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        
-        q_match = re.match(r'^\d+[\.\)]\s*(.+)', line)
-        if q_match:
-            content = q_match.group(1)
-            blank_match = re.search(r'\[([^\]]+)\]|_+([^_]+)_+|\*\*([^\*]+)\*\*', content)
-            if blank_match:
-                answer = blank_match.group(1) or blank_match.group(2) or blank_match.group(3)
-                question = re.sub(r'\[[^\]]+\]|_+[^_]+_+|\*\*[^\*]+\*\*', '_____', content)
-                questions.append({'question': question, 'answer': answer.strip()})
-    
-    return questions
-
-def parse_flashcards(flashcards_text):
-    cards = []
-    parts = re.split(r'CARD\s*\d*', flashcards_text, flags=re.IGNORECASE)
-    
-    for part in parts:
-        if not part.strip():
-            continue
-        front_match = re.search(r'Front:\s*(.+?)(?=Back:|$)', part, re.DOTALL | re.IGNORECASE)
-        back_match = re.search(r'Back:\s*(.+?)(?=Front:|CARD|$)', part, re.DOTALL | re.IGNORECASE)
-        
-        if front_match and back_match:
-            front = front_match.group(1).strip()
-            back = back_match.group(1).strip()
-            if front and back:
-                cards.append({'front': front, 'back': back})
-    return cards
-
 def reset_study_data():
-    keys_to_reset = ['quiz_data', 'quiz_raw', 'user_answers', 'quiz_submitted', 'tf_data', 
+    keys_to_reset = ['quiz_data', 'user_answers', 'quiz_submitted', 'tf_data', 
                      'fib_data', 'fib_answers', 'flashcards_data', 'flipped_cards', 
                      'matching_pairs', 'matched_pairs', 'matching_selected', 'study_guide_data',
                      'timer_start', 'timer_expired', 'chat_messages', 'show_hints', 'explanations']
@@ -348,19 +662,6 @@ def go_home():
     st.session_state.page = "home"
     st.session_state.study_mode = None
     reset_study_data()
-
-def call_ai(prompt, system_msg="You are a helpful educational assistant."):
-    try:
-        response = requests.post(
-            "https://text.pollinations.ai/",
-            json={"messages": [{"role": "system", "content": system_msg}, {"role": "user", "content": prompt}], "model": "openai"},
-            timeout=60
-        )
-        if response.status_code == 200:
-            return response.text
-    except:
-        pass
-    return None
 
 # ============== HOME PAGE ==============
 if st.session_state.page == "home":
@@ -433,7 +734,7 @@ if st.session_state.page == "home":
             st.session_state.page = "statistics"
             st.rerun()
     
-    # Theme toggle in sidebar
+    # Sidebar settings
     with st.sidebar:
         st.header("⚙️ Settings")
         theme = st.selectbox("🎨 Theme", ["Dark", "Light"], index=0 if st.session_state.theme == 'dark' else 1)
@@ -443,6 +744,12 @@ if st.session_state.page == "home":
         
         st.session_state.subject = st.selectbox("📚 Subject", ["General", "Math", "Science", "History", "Language", "Computer Science", "Art", "Music"])
         st.session_state.grade_level = st.selectbox("🎓 Grade Level", ["Elementary", "Middle School", "High School", "College", "Professional"])
+        
+        st.markdown("---")
+        st.session_state.debug_mode = st.checkbox("🐛 Debug Mode", value=st.session_state.debug_mode)
+        
+        if st.session_state.last_api_error:
+            st.error(f"Last Error: {st.session_state.last_api_error}")
         
         st.markdown("---")
         st.markdown("### About")
@@ -543,6 +850,18 @@ elif st.session_state.page == "study":
         st.markdown("---")
         st.markdown(f"**Subject:** {st.session_state.subject}")
         st.markdown(f"**Level:** {st.session_state.grade_level}")
+        
+        st.markdown("---")
+        st.session_state.debug_mode = st.checkbox("🐛 Debug Mode", value=st.session_state.debug_mode)
+        
+        # API Test button
+        if st.button("🧪 Test API Connection"):
+            with st.spinner("Testing..."):
+                test_result = call_ai_text("Say 'API connection successful!' in exactly those words.")
+                if test_result:
+                    st.success(f"✅ {test_result[:100]}")
+                else:
+                    st.error("❌ API connection failed")
     
     # Header
     mode_icons = {"Quiz": "📝", "Flashcards": "🎴", "Study Guide": "📖", "All Three": "🚀"}
@@ -560,103 +879,82 @@ elif st.session_state.page == "study":
             st.session_state.current_topic = topic
             update_streak()
             
-            with st.spinner("🤖 AI is preparing your study materials..."):
-                subject_context = f"for {st.session_state.grade_level} level {st.session_state.subject}" if st.session_state.subject != "General" else ""
+            subject_context = f"for {st.session_state.grade_level} level {st.session_state.subject}" if st.session_state.subject != "General" else f"for {st.session_state.grade_level} students"
+            
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            # Generate Quiz
+            if study_mode in ["Quiz", "All Three"]:
+                quiz_type = st.session_state.quiz_type
+                status_text.text(f"Generating {quiz_type} quiz...")
                 
-                # Generate Quiz
-                if study_mode in ["Quiz", "All Three"]:
-                    quiz_type = st.session_state.quiz_type
-                    
-                    if quiz_type == "Multiple Choice":
-                        prompt = f"""Generate a {difficulty} difficulty quiz about {topic} {subject_context} with {num_questions} multiple choice questions.
-
-Format EXACTLY like this:
-Q1: [Question]
-A) [Option A]
-B) [Option B]
-C) [Option C]
-D) [Option D]
-Correct Answer: [A/B/C/D]
-
-Q2: [Question]
-..."""
-                        result = call_ai(prompt)
-                        if result:
-                            st.session_state.quiz_data = parse_quiz(result)
-                    
-                    elif quiz_type == "True/False":
-                        prompt = f"""Generate {num_questions} True/False questions about {topic} {subject_context}.
-
-Format EXACTLY like this:
-1. [Statement that is either true or false]
-Answer: True
-
-2. [Statement that is either true or false]
-Answer: False
-
-Continue for all {num_questions} questions."""
-                        result = call_ai(prompt)
-                        if result:
-                            st.session_state.tf_data = parse_tf_quiz(result)
-                    
-                    elif quiz_type == "Fill in the Blank":
-                        prompt = f"""Generate {num_questions} fill-in-the-blank questions about {topic} {subject_context}.
-
-Format EXACTLY like this:
-1. The process of [photosynthesis] converts sunlight into energy.
-2. The capital of France is [Paris].
-
-Put the answer in [brackets]. Continue for all {num_questions} questions."""
-                        result = call_ai(prompt)
-                        if result:
-                            st.session_state.fib_data = parse_fib_quiz(result)
-                    
-                    if st.session_state.timed_mode:
-                        st.session_state.timer_start = time.time()
-                
-                # Generate Flashcards
-                if study_mode in ["Flashcards", "All Three"]:
-                    prompt = f"""Generate {num_flashcards} flashcards about {topic} {subject_context}.
-
-Format EXACTLY like this:
-CARD 1
-Front: [Question or term]
-Back: [Answer or definition]
-
-CARD 2
-Front: [Question or term]
-Back: [Answer or definition]"""
-                    result = call_ai(prompt)
+                if quiz_type == "Multiple Choice":
+                    result = generate_multiple_choice_quiz(topic, num_questions, difficulty, subject_context)
                     if result:
-                        cards = parse_flashcards(result)
-                        st.session_state.flashcards_data = cards
-                        if flashcard_mode == "Matching Game" and cards:
-                            random.shuffle(cards)
-                            st.session_state.matching_pairs = cards[:min(6, len(cards))]
+                        st.session_state.quiz_data = result
+                        progress_bar.progress(33)
+                    else:
+                        st.error("Failed to generate multiple choice quiz. Please try again.")
                 
-                # Generate Study Guide
-                if study_mode in ["Study Guide", "All Three"]:
-                    prompt = f"""Create a comprehensive study guide about {topic} {subject_context}.
-
-Include:
-1. Overview (2-3 sentences)
-2. Key Concepts (5 main ideas with explanations)
-3. Important Terms and Definitions
-4. Common Misconceptions
-5. Practice Tips
-6. Related Topics to Explore
-
-Make it clear and engaging for students."""
-                    result = call_ai(prompt)
+                elif quiz_type == "True/False":
+                    result = generate_true_false_quiz(topic, num_questions, difficulty, subject_context)
                     if result:
-                        st.session_state.study_guide_data = result
+                        st.session_state.tf_data = result
+                        progress_bar.progress(33)
+                    else:
+                        st.error("Failed to generate true/false quiz. Please try again.")
                 
-                st.success("✅ Study materials generated!")
+                elif quiz_type == "Fill in the Blank":
+                    result = generate_fill_blank_quiz(topic, num_questions, difficulty, subject_context)
+                    if result:
+                        st.session_state.fib_data = result
+                        progress_bar.progress(33)
+                    else:
+                        st.error("Failed to generate fill-in-the-blank quiz. Please try again.")
+                
+                if st.session_state.timed_mode:
+                    st.session_state.timer_start = time.time()
+            
+            # Generate Flashcards
+            if study_mode in ["Flashcards", "All Three"]:
+                status_text.text("Generating flashcards...")
+                cards = generate_flashcards(topic, num_flashcards, subject_context)
+                if cards:
+                    st.session_state.flashcards_data = cards
+                    if flashcard_mode == "Matching Game" and cards:
+                        random.shuffle(cards)
+                        st.session_state.matching_pairs = cards[:min(6, len(cards))]
+                    progress_bar.progress(66)
+                else:
+                    st.error("Failed to generate flashcards. Please try again.")
+            
+            # Generate Study Guide
+            if study_mode in ["Study Guide", "All Three"]:
+                status_text.text("Generating study guide...")
+                guide = generate_study_guide(topic, subject_context)
+                if guide:
+                    st.session_state.study_guide_data = guide
+                    progress_bar.progress(100)
+                else:
+                    st.error("Failed to generate study guide. Please try again.")
+            
+            progress_bar.progress(100)
+            status_text.text("✅ Study materials generated!")
+            
+            # Check if anything was generated
+            has_content = (st.session_state.quiz_data or st.session_state.tf_data or 
+                          st.session_state.fib_data or st.session_state.flashcards_data or 
+                          st.session_state.study_guide_data)
+            
+            if has_content:
                 st.balloons()
                 new_achs = check_achievements()
                 for ach in new_achs:
                     st.toast(f"🏆 Achievement Unlocked: {ACHIEVEMENTS[ach]['name']}")
                 st.rerun()
+            else:
+                st.error("No content was generated. Please check your internet connection and try again.")
     
     # ============== DISPLAY TIMER ==============
     if st.session_state.timed_mode and st.session_state.timer_start and not st.session_state.quiz_submitted:
@@ -686,14 +984,19 @@ Make it clear and engaging for students."""
                 # Hint button
                 if st.button(f"💡 Hint", key=f"hint_{i}"):
                     if i not in st.session_state.show_hints:
-                        hint = call_ai(f"Give a brief hint (1 sentence) for this question without revealing the answer: {q['question']}")
+                        hint = call_ai_text(f"Give a brief hint (1 sentence) for this question without revealing the answer: {q['question']}")
                         st.session_state.show_hints[i] = hint or "Think about the key concepts related to this topic."
                     st.rerun()
                 
                 if i in st.session_state.show_hints:
                     st.markdown(f"<div class='hint-box'>💡 {st.session_state.show_hints[i]}</div>", unsafe_allow_html=True)
                 
-                options = [f"{letter}) {text}" for letter, text in sorted(q['options'].items())]
+                # Handle both dict and list formats for options
+                if isinstance(q['options'], dict):
+                    options = [f"{letter}) {text}" for letter, text in sorted(q['options'].items())]
+                else:
+                    options = [f"{chr(65+j)}) {opt}" for j, opt in enumerate(q['options'])]
+                
                 selected = st.radio(f"Answer for Q{i+1}:", options, key=f"q_{i}", index=None, label_visibility="collapsed")
                 if selected:
                     st.session_state.user_answers[i] = selected[0]
@@ -711,7 +1014,8 @@ Make it clear and engaging for students."""
             correct_count = 0
             for i, q in enumerate(questions):
                 user_answer = st.session_state.user_answers.get(i, "")
-                is_correct = user_answer == q['correct']
+                correct = q['correct']
+                is_correct = user_answer == correct
                 if is_correct:
                     correct_count += 1
                 
@@ -719,19 +1023,39 @@ Make it clear and engaging for students."""
                 icon = "✅" if is_correct else "❌"
                 st.markdown(f"<div class='quiz-question {status}'><h4>{icon} Q{i+1}: {q['question']}</h4></div>", unsafe_allow_html=True)
                 
-                for letter, text in sorted(q['options'].items()):
-                    if letter == q['correct']:
-                        st.markdown(f"✅ **{letter}) {text}** *(Correct)*")
-                    elif letter == user_answer and not is_correct:
-                        st.markdown(f"❌ ~~{letter}) {text}~~ *(Your Answer)*")
-                    else:
-                        st.markdown(f"{letter}) {text}")
+                # Handle both dict and list formats
+                if isinstance(q['options'], dict):
+                    for letter, text in sorted(q['options'].items()):
+                        if letter == correct:
+                            st.markdown(f"✅ **{letter}) {text}** *(Correct)*")
+                        elif letter == user_answer and not is_correct:
+                            st.markdown(f"❌ ~~{letter}) {text}~~ *(Your Answer)*")
+                        else:
+                            st.markdown(f"{letter}) {text}")
+                else:
+                    for j, opt in enumerate(q['options']):
+                        letter = chr(65 + j)
+                        if letter == correct:
+                            st.markdown(f"✅ **{letter}) {opt}** *(Correct)*")
+                        elif letter == user_answer and not is_correct:
+                            st.markdown(f"❌ ~~{letter}) {opt}~~ *(Your Answer)*")
+                        else:
+                            st.markdown(f"{letter}) {opt}")
                 
                 # Explain wrong answer
                 if not is_correct:
                     if st.button(f"🤔 Explain Why", key=f"explain_{i}"):
                         if i not in st.session_state.explanations:
-                            exp = call_ai(f"Explain why the answer to '{q['question']}' is '{q['options'][q['correct']]}' and not '{q['options'].get(user_answer, 'not answered')}'. Keep it brief (2-3 sentences).")
+                            if isinstance(q['options'], dict):
+                                correct_text = q['options'].get(correct, correct)
+                                user_text = q['options'].get(user_answer, 'not answered')
+                            else:
+                                correct_idx = ord(correct) - 65
+                                correct_text = q['options'][correct_idx] if correct_idx < len(q['options']) else correct
+                                user_idx = ord(user_answer) - 65 if user_answer else -1
+                                user_text = q['options'][user_idx] if 0 <= user_idx < len(q['options']) else 'not answered'
+                            
+                            exp = call_ai_text(f"Explain why the answer to '{q['question']}' is '{correct_text}' and not '{user_text}'. Keep it brief (2-3 sentences).")
                             st.session_state.explanations[i] = exp or "The correct answer is based on the fundamental concepts of this topic."
                         st.rerun()
                     
@@ -796,7 +1120,7 @@ Make it clear and engaging for students."""
         
         if not st.session_state.quiz_submitted:
             for i, q in enumerate(questions):
-                st.markdown(f"<div class='quiz-question'><h4>Q{i+1}: {q['question']}</h4></div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='quiz-question'><h4>Q{i+1}: {q['statement']}</h4></div>", unsafe_allow_html=True)
                 selected = st.radio(f"Answer:", ["True", "False"], key=f"tf_{i}", index=None, horizontal=True)
                 if selected:
                     st.session_state.user_answers[i] = selected == "True"
@@ -815,7 +1139,7 @@ Make it clear and engaging for students."""
                 
                 status = "correct-answer" if is_correct else "incorrect-answer"
                 icon = "✅" if is_correct else "❌"
-                st.markdown(f"<div class='quiz-question {status}'><h4>{icon} {q['question']}</h4><p>Correct Answer: {q['answer']}</p></div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='quiz-question {status}'><h4>{icon} {q['statement']}</h4><p>Correct Answer: {q['answer']}</p></div>", unsafe_allow_html=True)
             
             score_pct = (correct_count / len(questions)) * 100
             add_xp(correct_count * 10)
@@ -831,7 +1155,7 @@ Make it clear and engaging for students."""
         
         if not st.session_state.quiz_submitted:
             for i, q in enumerate(questions):
-                st.markdown(f"**{i+1}. {q['question']}**")
+                st.markdown(f"**{i+1}. {q['sentence']}**")
                 answer = st.text_input(f"Your answer:", key=f"fib_{i}", label_visibility="collapsed")
                 st.session_state.fib_answers[i] = answer
             
@@ -849,7 +1173,7 @@ Make it clear and engaging for students."""
                     correct_count += 1
                 
                 icon = "✅" if is_correct else "❌"
-                st.markdown(f"{icon} **{q['question']}**")
+                st.markdown(f"{icon} **{q['sentence']}**")
                 st.markdown(f"Your answer: {st.session_state.fib_answers.get(i, 'No answer')} | Correct: **{q['answer']}**")
             
             score_pct = (correct_count / len(questions)) * 100
@@ -957,34 +1281,24 @@ Make it clear and engaging for students."""
             if user_question:
                 st.session_state.chat_messages.append({'role': 'user', 'content': user_question})
                 
-                response = call_ai(f"The user is studying {st.session_state.current_topic}. Answer their question: {user_question}")
+                response = call_ai_text(
+                    f"The user is studying {st.session_state.current_topic}. Answer their question: {user_question}",
+                    "You are a helpful educational tutor. Give clear, concise answers to help students understand concepts."
+                )
                 if response:
                     st.session_state.chat_messages.append({'role': 'ai', 'content': response})
                 
                 st.rerun()
     
     # ============== RELATED TOPICS ==============
-    if st.session_state.current_topic and (st.session_state.quiz_data or st.session_state.study_guide_data or st.session_state.flashcards_data):
+    if st.session_state.current_topic and (st.session_state.quiz_data or st.session_state.study_guide_data or st.session_state.flashcards_data or st.session_state.tf_data or st.session_state.fib_data):
         st.markdown("---")
         st.markdown("### 🔗 Related Topics to Explore")
         if st.button("Get Suggestions"):
-            related = call_ai(f"List 5 related topics to {st.session_state.current_topic} that a student might want to study next. Just list the topics, one per line.")
+            related = call_ai_text(f"List 5 related topics to {st.session_state.current_topic} that a student might want to study next. Just list the topics, one per line.")
             if related:
                 st.markdown(related)
     
-    # ============== DIAGRAM COMING SOON ==============
-    if st.session_state.quiz_data or st.session_state.flashcards_data or st.session_state.study_guide_data:
-        st.markdown("---")
-        st.header("🖼️ Study Diagram")
-        st.markdown("""
-        <div style='background: linear-gradient(135deg, #2d2d44 0%, #3d3d5c 100%); 
-                    border-radius: 15px; padding: 40px; text-align: center; border: 2px dashed #6366f1;'>
-            <p style='font-size: 48px;'>🎨</p>
-            <h3>Coming Soon!</h3>
-            <p style='color: #a0a0a0;'>AI-generated study diagrams will be available in a future update.</p>
-        </div>
-        """, unsafe_allow_html=True)
-    
     # Footer
     st.markdown("---")
-    st.markdown("<div class='footer'><p>Made with ❤️ for students everywhere | Powered by Pollinations.AI</p></div>", unsafe_allow_html=True)
+    st.markdown("<div class='footer'><p>Made with ❤️ for students everywhere | Powered by Pollinations.AI 🌸</p></div>", unsafe_allow_html=True)
